@@ -21,6 +21,11 @@ namespace py = boost::python;
 using ubyte = unsigned char;
 
 
+#include <iostream>
+#include <fstream>
+#include <sstream>
+int global_idx = 0;
+
 class GILScopedReverseLock
 {
   // see https://docs.python.org/2/c-api/init.html (Releasing the GIL ...)  
@@ -82,15 +87,16 @@ class PyH264Decoder
 public:
   /* Decoding style analogous to c/c++ way. Stop at frame boundaries. 
    * Return tuple containing frame data as above as nested tuple, and an integer telling how many bytes were consumed.  */
-  py::tuple decode_frame(const py::str &data_in_str);
+  //py::tuple decode_frame(const py::str &data_in_str);
   /* Process all the input data and return a list of all contained frames. */
-  py::list  decode(const py::str &data_in_str);
+  py::list  decode(const py::object& data_in_str);
 };
 
 
 py::tuple PyH264Decoder::decode_frame_impl(const ubyte *data_in, ssize_t len, ssize_t &num_consumed, bool &is_frame_available)
 {
   GILScopedReverseLock gilguard;
+  //std::cout << len << std::endl;
   num_consumed = decoder.parse((ubyte*)data_in, len);
   
   if (is_frame_available = decoder.is_frame_available())
@@ -101,14 +107,25 @@ py::tuple PyH264Decoder::decode_frame_impl(const ubyte *data_in, ssize_t len, ss
 
     gilguard.lock();
     //   Construction of py::handle causes ... TODO: WHAT? No increase of ref count ?!
-    py::object py_out_str(py::handle<>(PyString_FromStringAndSize(NULL, out_size)));
-    char* out_buffer = PyString_AsString(py_out_str.ptr());
-
-    gilguard.unlock();
-    const auto &rgbframe = converter.convert(frame, (ubyte*)out_buffer);
+    //py::object py_out_str(py::handle<>(py::borrowed(PyBytes_FromStringAndSize(NULL, out_size))));
+    py::object py_out_str(py::handle<>(py::borrowed(PyBytes_FromStringAndSize(NULL, out_size))));
+    Py_buffer pybuf;
+    
+    if(PyObject_GetBuffer(py_out_str.ptr(), &pybuf, PyBUF_SIMPLE) != -1)
+    {
+      void* buf = pybuf.buf;
+      const auto &rgbframe = converter.convert(frame, (ubyte*)buf);
+      return py::make_tuple(py_out_str, w, h, row_size(rgbframe));
+    }
+    else
+      return py::make_tuple(py::object(), 0, 0, 0);
+    /*gilguard.unlock();
+    
     
     gilguard.lock();
-    return py::make_tuple(py_out_str, w, h, row_size(rgbframe));
+    std::cout << "available" << std::endl;
+    return py::make_tuple(py_out_str, w, h, 0);
+    //return py::make_tuple(py::object(), 0, 0, 0);*/
   }
   else
   {
@@ -117,11 +134,11 @@ py::tuple PyH264Decoder::decode_frame_impl(const ubyte *data_in, ssize_t len, ss
   }
 }
 
-
+/*
 py::tuple PyH264Decoder::decode_frame(const py::str &data_in_str)
 {
-  ssize_t len = PyString_Size(data_in_str.ptr());
-  const ubyte* data_in = (const ubyte*)(PyString_AsString(data_in_str.ptr()));
+  ssize_t len = PyMapping_Size(data_in_str.ptr());
+  const ubyte* data_in = (const ubyte*)(data_in_str.ptr());
 
   ssize_t num_consumed = 0;
   bool is_frame_available = false;
@@ -129,12 +146,29 @@ py::tuple PyH264Decoder::decode_frame(const py::str &data_in_str)
   
   return py::make_tuple(frame, num_consumed);
 }
+*/
 
-
-py::list PyH264Decoder::decode(const py::str &data_in_str)
+py::list PyH264Decoder::decode(const py::object& data_in_str)
 {
-  ssize_t len = PyString_Size(data_in_str.ptr());
-  const ubyte* data_in = (const ubyte*)(PyString_AsString(data_in_str.ptr()));
+  py::stl_input_iterator<unsigned char> begin(data_in_str), end;
+  
+  // Copy the py_buffer into a local buffer with known continguous memory.
+  //std::stringstream sstream;
+  //sstream << "./test_" << global_idx++ << ".bin";
+
+  std::vector<ubyte> buffer(begin, end);
+  ssize_t len = buffer.size();
+
+  const ubyte* data_in = (const ubyte*) reinterpret_cast<unsigned char*>(&buffer[0]);
+  
+  //std::ofstream fout(sstream.str().c_str());
+  //fout.write((char*)data_in, len);
+  //fout.close();
+
+  //ssize_t len = data_in_str.len;
+  //const ubyte* data_in = (const ubyte*)(data_in_str.buf);
+  //ssize_t len = PyMapping_Size(data_in_str.ptr());
+  //const ubyte* data_in = (const ubyte*)(data_in_str.ptr());
   
   py::list out;
   
@@ -147,7 +181,7 @@ py::list PyH264Decoder::decode(const py::str &data_in_str)
       
       try
       {
-        auto frame = decode_frame_impl(data_in, len, num_consumed, is_frame_available);
+        py::tuple frame = decode_frame_impl(data_in, len, num_consumed, is_frame_available);
         if (is_frame_available)
         {
           out.append(frame);
@@ -167,7 +201,6 @@ py::list PyH264Decoder::decode(const py::str &data_in_str)
   catch (const H264DecodeFailure &e)
   {
   }
-  
   return out;
 }
 
@@ -176,7 +209,7 @@ BOOST_PYTHON_MODULE(libh264decoder)
 {
   PyEval_InitThreads(); // need for release of the GIL (http://stackoverflow.com/questions/8009613/boost-python-not-supporting-parallelism)
   py::class_<PyH264Decoder>("H264Decoder")
-                            .def("decode_frame", &PyH264Decoder::decode_frame)
+                            //.def("decode_frame", &PyH264Decoder::decode_frame)
                             .def("decode", &PyH264Decoder::decode);
   py::def("disable_logging", disable_logging);
 }
